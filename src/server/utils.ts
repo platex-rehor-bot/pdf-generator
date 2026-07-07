@@ -10,7 +10,7 @@ export const UpdateStatus = async (updateMessage: PDFComponent) => {
   const collection = pdfCache.getCollection(updateMessage.collectionId);
   const messageWithLength = {
     ...updateMessage,
-    expectedLength: collection?.expectedLength || 0,
+    expectedLength: collection?.expectedLength,
   };
   await produceMessage(UPDATE_TOPIC, messageWithLength)
     .then(() => {
