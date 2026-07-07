@@ -3,7 +3,8 @@ import config from '../common/config';
 const BROWSER_TIMEOUT = 120_000;
 import { CHROMIUM_PATH } from '../browser/helpers';
 import { apiLogger } from '../common/logging';
-import PdfCache from '../common/pdfCache';
+import PdfCache, { PdfStatus } from '../common/pdfCache';
+import { UpdateStatus } from './utils';
 
 export const GetPupCluster = async () => {
   const CONCURRENCY_DEFAULT = 2;
@@ -53,8 +54,6 @@ export const GetPupCluster = async () => {
 
       // Record component as Failed if componentId available
       if (componentId) {
-        const { UpdateStatus } = await import('./utils');
-        const { PdfStatus } = await import('../common/pdfCache');
         await UpdateStatus({
           collectionId,
           status: PdfStatus.Failed,

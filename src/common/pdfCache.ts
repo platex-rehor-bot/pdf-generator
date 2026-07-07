@@ -284,21 +284,18 @@ class PdfCache {
       this.data[collectionId].merging = true;
 
       // Fire-and-forget: merge in background without blocking
-      const mergePromise = this.mergePDFsFromCompleteCollection(collectionId);
-      if (mergePromise) {
-        mergePromise
-          .then(() => {
-            if (this.data[collectionId]) {
-              this.updateCollectionState(collectionId, PdfStatus.Generated);
-            }
-          })
-          .catch((error) => {
-            apiLogger.error(`Merge failed for ${collectionId}: ${error}`);
-            if (this.data[collectionId]) {
-              this.data[collectionId].merging = false;
-            }
-          });
-      }
+      this.mergePDFsFromCompleteCollection(collectionId)
+        .then(() => {
+          if (this.data[collectionId]) {
+            this.updateCollectionState(collectionId, PdfStatus.Generated);
+          }
+        })
+        .catch((error) => {
+          apiLogger.error(`Merge failed for ${collectionId}: ${error}`);
+          if (this.data[collectionId]) {
+            this.data[collectionId].merging = false;
+          }
+        });
     }
   }
 
