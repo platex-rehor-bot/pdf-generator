@@ -38,17 +38,34 @@ export const GetPupCluster = async () => {
   });
 
   // Add error handlers to prevent unhandled rejections from cluster tasks
-  cluster.on('taskerror', (err: Error, data: unknown) => {
+  cluster.on('taskerror', async (err: Error, data: unknown) => {
     apiLogger.error('Puppeteer cluster task error:', err, 'data:', data);
 
-    // After all retries exhausted, invalidate the entire collection
+    // After all retries exhausted, record component failure and invalidate collection
     if (data && typeof data === 'object' && 'collectionId' in data) {
       const collectionId = (data as { collectionId: string }).collectionId;
+      const componentId = (data as { componentId?: string }).componentId;
       const message = err instanceof Error ? err.message : String(err);
       apiLogger.error(
         `Collection ${collectionId} failed after retries: ${message}`,
       );
-      PdfCache.getInstance().invalidateCollection(collectionId, message);
+
+      // Record component as Failed if componentId available
+      if (componentId) {
+        const { UpdateStatus } = await import('./utils');
+        const { PdfStatus } = await import('../common/pdfCache');
+        await UpdateStatus({
+          collectionId,
+          status: PdfStatus.Failed,
+          filepath: '',
+          componentId,
+          error: message,
+        });
+        // UpdateStatus → verifyCollection → invalidateCollection (happens here)
+      } else {
+        // No componentId - directly invalidate collection
+        PdfCache.getInstance().invalidateCollection(collectionId, message);
+      }
     }
   });
 
