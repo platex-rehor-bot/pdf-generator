@@ -40,7 +40,7 @@ async function runPageTask(
   authState: AuthState,
 ): Promise<void> {
   await cluster.queue(
-    { collectionId, componentId },
+    { collectionId, componentId, order },
     async ({ page }: { page: Page }) => {
       if (PdfCache.getInstance().isCollectionFailed(collectionId)) {
         apiLogger.debug(

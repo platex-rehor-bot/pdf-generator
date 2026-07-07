@@ -45,6 +45,7 @@ export const GetPupCluster = async () => {
     if (data && typeof data === 'object' && 'collectionId' in data) {
       const collectionId = (data as { collectionId: string }).collectionId;
       const componentId = (data as { componentId?: string }).componentId;
+      const order = (data as { order?: number }).order;
       const message = err instanceof Error ? err.message : String(err);
       apiLogger.error(
         `Collection ${collectionId} failed after retries: ${message}`,
@@ -59,6 +60,7 @@ export const GetPupCluster = async () => {
           status: PdfStatus.Failed,
           filepath: '',
           componentId,
+          order,
           error: message,
         });
         // UpdateStatus → verifyCollection → invalidateCollection (happens here)
