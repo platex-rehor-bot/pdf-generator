@@ -60,6 +60,7 @@ export type PDFComponentGroup = {
   expectedLength: number;
   status: PdfStatus;
   error?: string;
+  merging?: boolean;
 };
 export type PDFComponent = {
   status: PdfStatus;
@@ -69,6 +70,7 @@ export type PDFComponent = {
   error?: string;
   numPages?: number;
   order?: number;
+  expectedLength?: number;
 };
 
 const addPageNumbers = async (pdfBuffer: Uint8Array): Promise<Uint8Array> => {
@@ -103,9 +105,11 @@ const addPageNumbers = async (pdfBuffer: Uint8Array): Promise<Uint8Array> => {
 class PdfCache {
   private static instance: PdfCache;
   private data: PdfCollection;
+  private timers: Map<string, NodeJS.Timeout>;
 
   private constructor() {
     this.data = {};
+    this.timers = new Map();
   }
 
   public static getInstance(): PdfCache {
@@ -138,6 +142,15 @@ class PdfCache {
       ({ componentId }) => componentId !== status.componentId,
     );
     this.data[collectionId].components.push(status);
+
+    // Apply expectedLength if present in component (piggybacked from Kafka)
+    if (
+      status.expectedLength !== undefined &&
+      status.expectedLength > 0 &&
+      this.data[collectionId].expectedLength === 0
+    ) {
+      this.data[collectionId].expectedLength = status.expectedLength;
+    }
   }
 
   public getCollection(id: string): PDFComponentGroup {
@@ -145,6 +158,11 @@ class PdfCache {
   }
 
   public deleteCollection(id: string) {
+    const timer = this.timers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      this.timers.delete(id);
+    }
     delete this.data[id];
   }
 
@@ -182,19 +200,22 @@ class PdfCache {
     collectionId: string,
     status: PdfStatus,
     error?: string,
+    overwriteComponentStatus = true,
   ): void {
     if (!this.data[collectionId]) {
       throw new Error('Collection not found');
     }
 
-    this.data[collectionId].components = this.data[collectionId].components.map(
-      (component) => {
+    if (overwriteComponentStatus) {
+      this.data[collectionId].components = this.data[
+        collectionId
+      ].components.map((component) => {
         return {
           ...component,
           status,
         };
-      },
-    );
+      });
+    }
     this.data[collectionId].status = status;
     this.data[collectionId].error = error;
   }
@@ -219,7 +240,13 @@ class PdfCache {
   }
 
   public invalidateCollection(collectionId: string, error: string): void {
-    this.updateCollectionState(collectionId, PdfStatus.Failed, error);
+    if (!this.data[collectionId]) {
+      apiLogger.debug(
+        `Cannot invalidate missing collection ${collectionId}: ${error}`,
+      );
+      return;
+    }
+    this.updateCollectionState(collectionId, PdfStatus.Failed, error, false);
   }
 
   public async verifyCollection(collectionId: string): Promise<void> {
@@ -250,10 +277,25 @@ class PdfCache {
     }
 
     if (this.allComponentsGenerated(collectionId, components)) {
-      // Everything is generated and looks good, kick off an async job
-      // to store them in a single PDF
-      await this.mergePDFsFromCompleteCollection(collectionId);
-      this.updateCollectionState(collectionId, PdfStatus.Generated);
+      // Guard against concurrent merge attempts
+      if (this.data[collectionId].merging) {
+        return;
+      }
+      this.data[collectionId].merging = true;
+
+      // Fire-and-forget: merge in background without blocking
+      this.mergePDFsFromCompleteCollection(collectionId)
+        .then(() => {
+          if (this.data[collectionId]) {
+            this.updateCollectionState(collectionId, PdfStatus.Generated);
+          }
+        })
+        .catch((error) => {
+          apiLogger.error(`Merge failed for ${collectionId}: ${error}`);
+          if (this.data[collectionId]) {
+            this.data[collectionId].merging = false;
+          }
+        });
     }
   }
 
@@ -273,16 +315,33 @@ class PdfCache {
   }
 
   public cleanExpiredCollection(uuid: string) {
+    // Clear any existing timer for this collection
+    const existingTimer = this.timers.get(uuid);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
     apiLogger.debug(
       `Timeout for ${uuid} has been set to ${formatTimeToEnglish(
         ENTRY_TIMEOUT,
       )}`,
     );
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       // This should potentially also call the objectStore to remove the PDF(s)
       apiLogger.debug(`Removing expired collection ${uuid}`);
       this.deleteCollection(uuid);
     }, ENTRY_TIMEOUT);
+
+    // Allow Node to exit even if this timer is still pending
+    timer.unref();
+    this.timers.set(uuid, timer);
+  }
+
+  public clearAllTimers(): void {
+    for (const timer of this.timers.values()) {
+      clearTimeout(timer);
+    }
+    this.timers.clear();
   }
 
   // After all slices of a PDF have been marked as "Generated", we can

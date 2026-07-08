@@ -18,7 +18,6 @@ import {
 } from '../../common/types';
 import { apiLogger, hpmLogger } from '../../common/logging';
 import { store } from '../../common/store';
-import { UpdateStatus } from '../utils';
 import { cluster } from '../cluster';
 import { generatePdf } from '../../browser/clusterTask';
 import { createProxyMiddleware } from 'http-proxy-middleware';
@@ -86,7 +85,6 @@ function addProxy(req: GenerateHandlerRequest) {
         preserveHeaderKeyCase: true,
         on: {
           proxyReq: (proxyReq) => {
-            console.log('THIS SHOULD NOT BE HERE');
             const authHeader = proxyReq.getHeader(
               config.AUTHORIZATION_CONTEXT_KEY,
             );
@@ -236,14 +234,7 @@ router.post(
       // Only return a 500 error. 400's will be served by the status endpoint.
       // We cannot validate a payload's parameters until the browser is running
       apiLogger.error(`Internal Server error: ${JSON.stringify(error)}`);
-      const updateMessage = {
-        status: PdfStatus.Failed,
-        error: JSON.stringify(error),
-        filepath: '',
-        collectionId: collectionId,
-        componentId: '',
-      };
-      await UpdateStatus(updateMessage);
+      pdfCache.invalidateCollection(collectionId, JSON.stringify(error));
       res.status(500).send({
         error: {
           status: 500,

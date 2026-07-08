@@ -19,8 +19,11 @@ const mockPage = {
 
 jest.mock('../server/cluster', () => ({
   cluster: {
-    queue: jest.fn((taskFn: ({ page }: { page: unknown }) => Promise<void>) =>
-      taskFn({ page: mockPage }),
+    queue: jest.fn(
+      (
+        _taskData: unknown,
+        taskFn: ({ page }: { page: unknown }) => Promise<void>,
+      ) => taskFn({ page: mockPage }),
     ),
   },
 }));
@@ -44,6 +47,7 @@ jest.mock('../common/logging', () => ({
     debug: jest.fn(),
     info: jest.fn(),
     error: jest.fn(),
+    warn: jest.fn(),
     warning: jest.fn(),
   },
 }));
@@ -169,47 +173,50 @@ describe('generatePdf', () => {
   });
 
   describe('page render error', () => {
-    it('updates status to Failed when DOM error element exists', async () => {
+    it('throws error without calling UpdateStatus(Failed) - retry not defeated', async () => {
       mockPage.evaluate.mockResolvedValue(
         'Request failed with status code 401',
       );
       const req = makePdfRequest();
       initCollection('coll-err');
 
-      await generatePdf(req, 'coll-err', 1, makeAuthState());
+      await expect(
+        generatePdf(req, 'coll-err', 1, makeAuthState()),
+      ).rejects.toThrow('Page render error');
 
-      expect(UpdateStatus).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          status: PdfStatus.Failed,
-          componentId: req.uuid,
-          collectionId: 'coll-err',
-          error: expect.stringContaining('Page render error'),
-        }),
+      // UpdateStatus called once for Generating, never for Failed (catch block removed it)
+      expect(UpdateStatus).toHaveBeenCalledTimes(1);
+      expect(UpdateStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ status: PdfStatus.Generating }),
       );
     });
 
-    it('invalidates the collection on render error', async () => {
+    it('throws error without invalidating collection (retry handled by cluster)', async () => {
       mockPage.evaluate.mockResolvedValue('Some error');
       initCollection('coll-inv');
       const pdfCache = PdfCache.getInstance();
       const spy = jest.spyOn(pdfCache, 'invalidateCollection');
 
-      await generatePdf(makePdfRequest(), 'coll-inv', 1, makeAuthState());
+      await expect(
+        generatePdf(makePdfRequest(), 'coll-inv', 1, makeAuthState()),
+      ).rejects.toThrow('Page render error');
 
-      expect(spy).toHaveBeenCalledWith('coll-inv', expect.any(String));
+      expect(spy).not.toHaveBeenCalled();
       spy.mockRestore();
     });
 
     it('closes the page after render error', async () => {
       mockPage.evaluate.mockResolvedValue('Error');
       initCollection('coll-close-err');
-      await generatePdf(makePdfRequest(), 'coll-close-err', 1, makeAuthState());
+      await expect(
+        generatePdf(makePdfRequest(), 'coll-close-err', 1, makeAuthState()),
+      ).rejects.toThrow();
       expect(mockPage.close).toHaveBeenCalled();
     });
   });
 
   describe('page load failure', () => {
-    it('updates status to Failed on 500 response', async () => {
+    it('throws error without calling UpdateStatus(Failed) on 500 response', async () => {
       mockPage.goto.mockResolvedValue({
         status: () => 500,
         statusText: () => 'Internal Server Error',
@@ -217,48 +224,45 @@ describe('generatePdf', () => {
       const req = makePdfRequest();
       initCollection('coll-500');
 
-      await generatePdf(req, 'coll-500', 1, makeAuthState());
+      await expect(
+        generatePdf(req, 'coll-500', 1, makeAuthState()),
+      ).rejects.toThrow('Puppeteer error');
 
-      expect(UpdateStatus).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          status: PdfStatus.Failed,
-          componentId: req.uuid,
-          error: expect.stringContaining('Puppeteer error'),
-        }),
+      // Only Generating status, no Failed
+      expect(UpdateStatus).toHaveBeenCalledTimes(1);
+      expect(UpdateStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ status: PdfStatus.Generating }),
       );
     });
 
-    it('updates status to Failed on null response', async () => {
+    it('throws error without calling UpdateStatus(Failed) on null response', async () => {
       mockPage.goto.mockResolvedValue(null);
       const req = makePdfRequest();
       initCollection('coll-null');
 
-      await generatePdf(req, 'coll-null', 1, makeAuthState());
+      await expect(
+        generatePdf(req, 'coll-null', 1, makeAuthState()),
+      ).rejects.toThrow('Puppeteer error');
 
-      expect(UpdateStatus).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          status: PdfStatus.Failed,
-        }),
-      );
+      // Only Generating status, no Failed
+      expect(UpdateStatus).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('timeout failure', () => {
-    it('updates status to Failed on page.goto timeout', async () => {
+    it('throws error without calling UpdateStatus(Failed) on page.goto timeout', async () => {
       mockPage.goto.mockRejectedValue(
         new Error('TimeoutError: Navigation timeout of 120000ms exceeded'),
       );
       const req = makePdfRequest();
       initCollection('coll-timeout');
 
-      await generatePdf(req, 'coll-timeout', 1, makeAuthState());
+      await expect(
+        generatePdf(req, 'coll-timeout', 1, makeAuthState()),
+      ).rejects.toThrow('timeout');
 
-      expect(UpdateStatus).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          status: PdfStatus.Failed,
-          error: expect.stringContaining('timeout'),
-        }),
-      );
+      // Only Generating status, no Failed
+      expect(UpdateStatus).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -284,7 +288,7 @@ describe('generatePdf', () => {
   });
 
   describe('token refresh integration', () => {
-    it('refreshes token before setting headers when expiring', async () => {
+    it('refreshes token before setting headers when expiring (proactive)', async () => {
       isTokenExpiringSoon.mockReturnValue(true);
       refreshAccessToken.mockResolvedValue({
         accessToken: 'Bearer refreshed-token',
@@ -300,6 +304,56 @@ describe('generatePdf', () => {
       expect(mockPage.setExtraHTTPHeaders).toHaveBeenCalledWith(
         expect.objectContaining({
           'x-pdf-auth': 'Bearer refreshed-token',
+        }),
+      );
+    });
+
+    it('refreshes token after 401 response detected (reactive)', async () => {
+      type Response = {
+        status: () => number;
+        url: () => string;
+        ok: () => boolean;
+      };
+
+      type ResponseHandler = (response: Response) => Promise<void>;
+
+      isTokenExpiringSoon.mockReturnValue(false);
+      refreshAccessToken.mockResolvedValue({
+        accessToken: 'Bearer refreshed-after-401',
+      });
+      const authState = makeAuthState({ authHeader: 'Bearer original-token' });
+
+      // Capture ALL response handlers (there are 2: 401 tracker + asset cache)
+      const responseHandlers: ResponseHandler[] = [];
+      mockPage.on.mockImplementation(
+        (event: string, handler: ResponseHandler) => {
+          if (event === 'response') {
+            responseHandlers.push(handler);
+          }
+        },
+      );
+
+      mockPage.goto.mockImplementation(async () => {
+        // Trigger 401 via first response handler (401 tracker)
+        if (responseHandlers[0]) {
+          await responseHandlers[0]({
+            status: () => 401,
+            url: () => 'http://api/endpoint',
+            ok: () => false,
+          });
+        }
+        return { status: () => 200, statusText: () => 'OK' };
+      });
+
+      await generatePdf(makePdfRequest(), 'coll-reactive', 1, authState);
+
+      expect(refreshAccessToken).toHaveBeenCalledWith(
+        'Bearer some-refresh-token',
+      );
+      expect(authState.authHeader).toBe('Bearer refreshed-after-401');
+      expect(mockPage.setExtraHTTPHeaders).toHaveBeenCalledWith(
+        expect.objectContaining({
+          'x-pdf-auth': 'Bearer refreshed-after-401',
         }),
       );
     });

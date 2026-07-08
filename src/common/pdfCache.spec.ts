@@ -1,10 +1,15 @@
 import PdfCache, { PDFComponent, PdfStatus } from './pdfCache';
 
 describe('Pdf Cache updates', () => {
+  const pdfCache = PdfCache.getInstance();
+
   beforeEach(() => {
     jest.resetAllMocks();
   });
-  const pdfCache = PdfCache.getInstance();
+
+  afterAll(() => {
+    pdfCache.clearAllTimers();
+  });
   const cache: PDFComponent = {
     status: PdfStatus.Failed,
     filepath: '',
@@ -16,8 +21,8 @@ describe('Pdf Cache updates', () => {
   const baseId = '7855a523-fc64-4e51-910a-b1ff3918b440';
   pdfCache.addToCollection(baseId, cache);
 
-  it('should return a valid collection', () => {
-    pdfCache.verifyCollection(baseId);
+  it('should return a valid collection', async () => {
+    await pdfCache.verifyCollection(baseId);
     const coll = pdfCache.getCollection(baseId);
     expect(coll.components.length).toBe(1);
     expect(coll.components[0].componentId).toBe(
@@ -25,11 +30,11 @@ describe('Pdf Cache updates', () => {
     );
   });
 
-  it('should validate a generated collection with all expected components', () => {
+  it('should validate a generated collection with all expected components', async () => {
     const mockMergePDFsFromCompleteCollection = jest
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .spyOn<PdfCache, any>(pdfCache, 'mergePDFsFromCompleteCollection')
-      .mockImplementation(jest.fn());
+      .mockResolvedValue(undefined);
     const comp: PDFComponent = {
       status: PdfStatus.Generated,
       filepath: 'blah',
@@ -47,13 +52,13 @@ describe('Pdf Cache updates', () => {
     const compId = comp.collectionId;
     pdfCache.addToCollection(compId, comp);
     pdfCache.setExpectedLength(compId, 2);
-    pdfCache.verifyCollection(compId);
+    await pdfCache.verifyCollection(compId);
     const collection = pdfCache.getCollection(compId);
     expect(collection.expectedLength).toBe(2);
     expect(collection.components.length).toBe(1);
     expect(collection.status).toBe(PdfStatus.Generating);
     pdfCache.addToCollection(compId, another);
-    pdfCache.verifyCollection(compId);
+    await pdfCache.verifyCollection(compId);
     expect(collection.expectedLength).toBe(2);
     expect(collection.components.length).toBe(2);
     // Since the "Generated" status is dependant on uploading a PDF
@@ -63,15 +68,15 @@ describe('Pdf Cache updates', () => {
     expect(mockMergePDFsFromCompleteCollection).toHaveBeenCalledWith(compId);
   });
 
-  it('should invalidate a failed collection', () => {
-    pdfCache.verifyCollection(baseId);
+  it('should invalidate a failed collection', async () => {
+    await pdfCache.verifyCollection(baseId);
     const coll = pdfCache.getCollection(baseId);
     expect(coll.components.length).toBe(1);
     expect(coll.status).toBe('Failed');
     expect(coll.error).toBe('oops');
   });
 
-  it('should reset a collection with no expectedLength', () => {
+  it('should reset a collection with no expectedLength', async () => {
     const noExp: PDFComponent = {
       status: PdfStatus.Generating,
       filepath: 'blah',
@@ -81,7 +86,7 @@ describe('Pdf Cache updates', () => {
     };
     const noeExpId = noExp.collectionId;
     pdfCache.addToCollection(noeExpId, noExp);
-    pdfCache.verifyCollection(noeExpId);
+    await pdfCache.verifyCollection(noeExpId);
     const noLen = pdfCache.getCollection(noeExpId);
     expect(noLen.expectedLength).toBe(0);
     expect(noLen.components.length).toBe(1);
@@ -174,7 +179,7 @@ describe('Pdf Cache updates', () => {
     expect(pdfCache.isCollectionFailed('nonexistent-collection')).toBe(false);
   });
 
-  it('should set the length properly when a collection has not been added directly', () => {
+  it('should set the length properly when a collection has not been added directly', async () => {
     const notAdded: PDFComponent = {
       status: PdfStatus.Generated,
       filepath: 'blah',
@@ -188,7 +193,204 @@ describe('Pdf Cache updates', () => {
     expect(added.components.length).toBe(0);
     expect(added.status).toBe('Generating');
     expect(added.expectedLength).toBe(2);
-    pdfCache.verifyCollection(compId);
+    await pdfCache.verifyCollection(compId);
     expect(added.status).toBe('Generating');
+  });
+});
+
+function makeComponent(
+  collectionId: string,
+  componentId: string,
+  status: PdfStatus,
+  order: number,
+): PDFComponent {
+  return {
+    status,
+    filepath:
+      status === PdfStatus.Generated ? `/tmp/report_${componentId}.pdf` : '',
+    collectionId,
+    componentId,
+    numPages: status === PdfStatus.Generated ? 6 : 0,
+    error: status === PdfStatus.Failed ? 'some error' : "''",
+    order,
+  };
+}
+
+describe('verifyCollection non-blocking merge behavior', () => {
+  /**
+   * verifyCollection should trigger merge in background and return immediately,
+   * preventing status endpoint from blocking on large collection merges.
+   */
+  const pdfCache = PdfCache.getInstance();
+  const collectionId = 'non-blocking-merge-test-collection';
+
+  afterAll(() => {
+    pdfCache.clearAllTimers();
+  });
+
+  it('should return before merge completes', async () => {
+    let mergeStarted = false;
+    let mergeFinished = false;
+
+    const mergeSpy = jest
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .spyOn<PdfCache, any>(pdfCache, 'mergePDFsFromCompleteCollection')
+      .mockImplementation(async () => {
+        mergeStarted = true;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        mergeFinished = true;
+      });
+
+    pdfCache.setExpectedLength(collectionId, 3);
+    for (let i = 1; i <= 3; i++) {
+      pdfCache.addToCollection(
+        collectionId,
+        makeComponent(collectionId, `merge-comp-${i}`, PdfStatus.Generated, i),
+      );
+    }
+
+    await pdfCache.verifyCollection(collectionId);
+
+    expect(mergeStarted).toBe(true);
+    expect(mergeFinished).toBe(false);
+
+    mergeSpy.mockRestore();
+  });
+});
+
+describe('verifyCollection merge concurrency guard', () => {
+  /**
+   * Concurrent verifyCollection calls should trigger merge only once.
+   * Prevents duplicate merges when UpdateStatus and status endpoint
+   * both call verifyCollection simultaneously.
+   */
+  const pdfCache = PdfCache.getInstance();
+  const collectionId = 'merge-guard-test-collection';
+
+  afterAll(() => {
+    pdfCache.clearAllTimers();
+  });
+
+  it('should trigger merge only once for concurrent calls', async () => {
+    let mergeCallCount = 0;
+
+    const mergeSpy = jest
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .spyOn<PdfCache, any>(pdfCache, 'mergePDFsFromCompleteCollection')
+      .mockImplementation(async () => {
+        mergeCallCount++;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+
+    pdfCache.setExpectedLength(collectionId, 2);
+    pdfCache.addToCollection(
+      collectionId,
+      makeComponent(collectionId, 'race-comp-1', PdfStatus.Generated, 1),
+    );
+    pdfCache.addToCollection(
+      collectionId,
+      makeComponent(collectionId, 'race-comp-2', PdfStatus.Generated, 2),
+    );
+
+    await Promise.all([
+      pdfCache.verifyCollection(collectionId),
+      pdfCache.verifyCollection(collectionId),
+    ]);
+
+    expect(mergeCallCount).toBe(1);
+
+    mergeSpy.mockRestore();
+  });
+});
+
+describe('expectedLength cross-pod sync via Kafka', () => {
+  /**
+   * Simulates pod receiving component updates via Kafka without
+   * the setExpectedLength call (which only runs on the create handler pod).
+   */
+  const pdfCache = PdfCache.getInstance();
+  const collectionId = 'kafka-sync-test-collection';
+
+  afterAll(() => {
+    pdfCache.clearAllTimers();
+  });
+
+  it('should apply expectedLength from Kafka messages', async () => {
+    const mockMerge = jest
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .spyOn<PdfCache, any>(pdfCache, 'mergePDFsFromCompleteCollection')
+      .mockImplementation(async () => {});
+
+    // Simulate Kafka consumer receiving components with expectedLength piggybacked
+    for (let i = 1; i <= 5; i++) {
+      const component = makeComponent(
+        collectionId,
+        `comp-${i}`,
+        PdfStatus.Generated,
+        i,
+      );
+      // Add expectedLength to component (simulating Kafka message payload)
+      component.expectedLength = 5;
+      pdfCache.addToCollection(collectionId, component);
+    }
+
+    const collection = pdfCache.getCollection(collectionId);
+    expect(collection.expectedLength).toBe(5);
+    expect(collection.components.length).toBe(5);
+
+    await pdfCache.verifyCollection(collectionId);
+
+    // Should transition to Generated (not stuck at Generating)
+    expect(mockMerge).toHaveBeenCalledWith(collectionId);
+
+    mockMerge.mockRestore();
+  });
+});
+
+describe('invalidateCollection preserves component status', () => {
+  const pdfCache = PdfCache.getInstance();
+
+  afterAll(() => {
+    pdfCache.clearAllTimers();
+  });
+
+  it('should preserve component statuses when invalidating collection', () => {
+    const collectionId = 'preserve-status-collection';
+    pdfCache.setExpectedLength(collectionId, 3);
+    pdfCache.addToCollection(
+      collectionId,
+      makeComponent(collectionId, 'comp-success', PdfStatus.Generated, 1),
+    );
+    pdfCache.addToCollection(
+      collectionId,
+      makeComponent(collectionId, 'comp-fail', PdfStatus.Failed, 2),
+    );
+    pdfCache.addToCollection(
+      collectionId,
+      makeComponent(collectionId, 'comp-pending', PdfStatus.Generating, 3),
+    );
+
+    pdfCache.invalidateCollection(collectionId, 'Cluster retry exhausted');
+
+    const collection = pdfCache.getCollection(collectionId);
+    expect(collection.status).toBe(PdfStatus.Failed);
+    expect(collection.error).toBe('Cluster retry exhausted');
+
+    // Component statuses preserved (not overwritten to Failed)
+    expect(collection.components[0].status).toBe(PdfStatus.Generated);
+    expect(collection.components[1].status).toBe(PdfStatus.Failed);
+    expect(collection.components[2].status).toBe(PdfStatus.Generating);
+  });
+
+  it('should not throw when invalidating missing collection', () => {
+    const missingCollectionId = 'non-existent-collection';
+
+    // Should not throw - just log and return
+    expect(() => {
+      pdfCache.invalidateCollection(missingCollectionId, 'Collection expired');
+    }).not.toThrow();
+
+    // Collection still does not exist
+    expect(pdfCache.getCollection(missingCollectionId)).toBeUndefined();
   });
 });
