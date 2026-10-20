@@ -2,31 +2,38 @@
 # Lists RPM packages needed by the Dockerfile runtime stage.
 #
 # Generate the resolved rpms.lock.yaml using rpm-lockfile-prototype:
-#   pip install rpm-lockfile-prototype  # requires python3-dnf system package
-#   rpm-lockfile --image registry.access.redhat.com/ubi10/nodejs-22-minimal:10.2 \
-#     --outfile rpms.lock.yaml rpms.in.yaml
+#   pip install git+https://github.com/konflux-ci/rpm-lockfile-prototype.git
+#   rpm-lockfile-prototype --arch x86_64 --outfile rpms.lock.yaml rpms.in.yaml
 #
 # The builder stage does NOT need RPMs when building hermetically
 # (native modules use prebuilt binaries via --ignore-scripts).
 contentOrigin:
-  type: repo-file
+  repos:
+    - repoid: ubi-10-for-x86_64-baseos-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/x86_64/baseos/os/
+    - repoid: ubi-10-for-x86_64-appstream-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/x86_64/appstream/os/
 packages:
   # Chrome runtime dependencies (needed by Puppeteer headless Chrome)
-  - name: bzip2
-  - name: fontconfig
-  - name: pango
-  - name: libXcomposite
-  - name: libXcursor
-  - name: libXdamage
-  - name: libXext
-  - name: libXi
-  - name: libXtst
-  - name: cups-libs
-  - name: libXrandr
-  - name: alsa-lib
-  - name: atk
-  - name: gtk3
-  - name: libdrm
-  - name: mesa-libgbm
-  - name: libxshmfence
-  - name: nss
+  - bzip2
+  - fontconfig
+  - pango
+  - libXcomposite
+  - libXcursor
+  - libXdamage
+  - libXext
+  - libXi
+  - libXtst
+  - cups-libs
+  - libXrandr
+  - alsa-lib
+  - atk
+  - gtk3
+  - libdrm
+  - mesa-libgbm
+  - libxshmfence
+  - nss
+arches:
+  - x86_64
+context:
+  bare: true
