@@ -11,5 +11,5 @@ metadata:
   version: "1.0"
 artifacts:
   - download_url: https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.47/linux64/chrome-linux64.zip
-    checksum: "sha256:PLACEHOLDER_RUN_CURL_COMMAND_ABOVE"
+    checksum: "sha256:89778cbf7a852726b6f51649b2586b894c00737e81f8031733721560d21bbea7"
     filename: chrome-linux64.zip
